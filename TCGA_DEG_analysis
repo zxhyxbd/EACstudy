@@ -1,0 +1,192 @@
+library(edgeR)
+library(limma)
+library(DESeq2)
+
+#定义去除重复样本的函数FilterDuplicate
+FilterDuplicate <- function(metadata) {
+    filter <- which(duplicated(metadata[,'sample']))
+    if (length(filter) != 0) {
+        metadata <- metadata[-filter,]
+    }
+    message (paste('Removed', length(filter), 'samples', sep=' '))
+    return (metadata)
+}
+
+#定义过滤样本类型的函数FilterSampleType，只保留PrimaryTumor和SolidTissueNormal这两种样本类型
+FilterSampleType <- function(metadata) {
+    filter <- which(! metadata$sample_type %in% 
+        c('PrimaryTumor', 'SolidTissueNormal'))
+    if (length(filter) != 0) {
+        metadata <- metadata[-filter,]
+    }
+    message (paste('Removed', length(filter), 'samples', sep=' '))
+    return (metadata)
+}
+
+#定义做差异表达分析的函数
+#@counts是合并之后的表达矩阵
+#@group是样本的类型，PrimaryTumor还是SolidTissueNormal
+#@comparison是比较的方式，eg. PrimaryTumor-SolidTissueNormal,就是肿瘤比上癌旁正常对照
+#@method，差异表达分析方法，默认为limma，也可以设定为edgeR或DESeq2
+#@filter，逻辑值，是否根据基因的cpm值对基因进行过滤
+DEA <- function(counts, group, comparison, method='limma', filter=TRUE) {
+  #加载注释文件，这个文件中包含了基因的注释信息，有ensembl gene ID，基因名字以及基因的编码类型
+  #是mRNA还是长非编码RNA
+  load("annotation.rda")
+  #基于表达谱矩阵创建一个DGEList的对象
+  dge = DGEList(counts = counts)
+  #计算每一个gene的cpm（count per million）值，要求在一半的样本里面cpm>1
+  #这个基因才会被保留，否则这个基因会被删掉，不进行后续分析
+  #这里的cpm>1，以及0.5的样本数，可以根据自己的需求修改
+  keep <- rowSums(cpm(dge) > 1) >= 0.5*length(group)
+  
+  #判断使用哪一种方法做差异表达分析
+  #如果使用DESeq2
+  if (method == 'DESeq2') {
+    #根据样本类型创建一个数据框
+    coldata <- data.frame(group)
+    #这个是创建DESeq2特有的数据格式，包括表达谱矩阵，样本类型，以及分组
+    dds <- DESeqDataSetFromMatrix(countData = counts,
+                                  colData = coldata, design = ~ group)
+    
+    #dds对象中增加一个group分组信息，是因子
+    #因子的顺序根据comparison的设置来确定
+    dds$group <- factor(dds$group, levels = 
+                          rev(strsplit(comparison, '-', fixed=TRUE)[[1]]))
+    
+    #如果设置了过滤，那么根据cpm值进行过滤
+    #keep中保存的是通过了过滤标准的基因
+    if (filter==TRUE) {
+      dds <- dds[keep, ]
+    }
+    
+    #使用DESeq函数做差异表达分析
+    dds <- DESeq(dds)
+    #提取差异表达分析的结果
+    res <- results(dds)
+    #转换成数据框
+    DEGAll <- data.frame(res)
+    #设置数据框的列明
+    colnames(DEGAll) <- c('baseMean', 'logFC', 'lfcSE', 'stat', 
+                          'PValue', 'FDR')
+    #如果设置的差异表达分析方法为edgeR或者limma
+  } else if (method %in% c('edgeR', 'limma')) {
+    #将分组信息转换成因子
+    group <- factor(group)
+    #创建差异表达分析的设计，也就是如何对样本进行分组
+    design <- model.matrix(~0+group)
+    #修改这个设计的列名
+    colnames(design) <- levels(group)
+    #创建比较方法，eg.PrimaryTumor-SolidTissueNormal，肿瘤比上癌旁正常对照
+    contrast.matrix <- makeContrasts(contrasts=comparison, 
+                                     levels=design)
+    #如果设置了过滤，那么根据cpm值进行过滤
+    #keep中保存的是通过了过滤标准的基因
+    if (filter==TRUE) {
+      dge <- dge[keep,,keep.lib.sizes = TRUE]
+    }
+    #有基因被过滤之后，每个样本的文库大小会发生变化
+    #这里需要重新计算归一化因子
+    dge <- calcNormFactors(dge)
+    
+    #进一步区分，如果使用的是edgeR方法
+    if (method == 'edgeR') {
+      #先估计基因表达的离散程度
+      dge <- estimateDisp(dge, design)
+      #对每一个基因进行负二项式广义对数线性模型拟合
+      fit <- glmFit(dge, design)
+      lrt <- glmLRT(fit, contrast=contrast.matrix)
+      #提取差异表达分析的结果
+      DEGAll <- lrt$table
+      #如果使用limma方法
+    } else if (method == 'limma') {
+      #首先使用voom函数对表达谱数据进行归一化
+      v <- voom(dge, design=design, plot = FALSE)
+      #对每一个基因进行线性模型拟合
+      fit <- lmFit(v, design)
+      #计算给定的一组对比的系数和标准误差
+      fit2 <- contrasts.fit(fit, contrast.matrix)
+      #利用贝叶斯方法计算统计t值，p值
+      fit2 <- eBayes(fit2)
+      #导出差异表达分析的结果
+      DEGAll <- topTable(fit2, coef=1, n = Inf)
+      #修改列名
+      colnames(DEGAll) <- c('logFC', 'AveExpr', 't', 
+                            'PValue', 'FDR', 'B')
+    }
+  }
+  
+  #对差异表达分析得到的原始p值进行FDR校正
+  DEGAll$FDR <- p.adjust(DEGAll$PValue, method = 'fdr')
+  #对FDR进行有小到大排序
+  o <- order(DEGAll$FDR)
+  DEGAll <- DEGAll[o,]
+  
+  #将Ensembl基因ID转换成基因名字
+  #添加基因的类型，mRNA还是长的非编码RNA，或其他RNA类型
+  if (startsWith(rownames(counts)[1], 'ENSG')) {
+    degList <- biotype[match(rownames(DEGAll), biotype$ensemblID),]
+    degOutput <- data.frame(symbol=degList$geneSymbol, 
+                            group=degList$group, DEGAll)
+    #如果找不到对应的基因名字，删除这个基因
+    keep <- which(! is.na(degOutput$symbol))
+    degOutput <- degOutput[keep,]
+    return(degOutput)
+  } else {
+    #如果不是ENSG开头的基因，例如miRNA，则不作任何处理，直接输出
+    return (DEGAll)
+  }
+}
+
+#定义过滤差异表达分析结果的函数
+#@deg所有的差异表达分析的结果
+#@gene.type，保留的基因类型，默认为所有，可以设置protein_coding或者long_non_coding
+#@fc，fold change，默认为2倍
+#@pval，默认为0.01
+DEReport <- function(deg, gene.type='all', fc=2, pval=0.01) {
+  sig <- abs(deg$logFC)>log(fc,2) & deg$FDR<pval
+  
+  degFinal <- deg[sig,]
+  
+  if (gene.type=='all' | gene.type=='miRNAs') {
+    return (degFinal)
+  } else {
+    keep <- degFinal$group == gene.type
+    degFinal <- degFinal[keep,]
+    return (degFinal)
+  }
+}
+
+#############################################
+#RNAseq差异表达分析
+#############################################
+#读入RNAseq的表达矩阵文件
+rnaCounts=read.table("results/combined_RNAseq_counts.txt",header=T,row.names=1,sep="\t",check.names = F)
+dim(rnaCounts)
+
+#读入RNAseq的sample sheet文件
+metaMatrix.RNA=read.table("gdc_sample_sheet.2022-09-19.tsv",sep="\t",header=T,stringsAsFactors = F)
+#替换.为下划线，转换成小写，sample_id替换成sample
+names(metaMatrix.RNA)=gsub("sample_id","sample",gsub("\\.","_",tolower(names(metaMatrix.RNA))))
+#删掉最后一列sample_type中的空格
+metaMatrix.RNA$sample_type=gsub(" ","",metaMatrix.RNA$sample_type)
+
+#删掉重复的样本
+metaMatrix.RNA <- FilterDuplicate(metaMatrix.RNA)
+#删掉非PrimaryTumor和SolidTissueNormal的样本
+#会删掉像Recurrent Tumor这样的样本
+metaMatrix.RNA <- FilterSampleType(metaMatrix.RNA)
+rnaCounts=rnaCounts[,metaMatrix.RNA$sample]
+#######################################
+#使用limma方法做差异表达分析
+#######################################
+DEGAll_limma <- DEA(counts     = rnaCounts, 
+                        group      = metaMatrix.RNA$sample_type, 
+                        comparison = 'PrimaryTumor-SolidTissueNormal', 
+                        method     = 'limma'
+                        )
+write.table(file="results/RNAseq_limma.txt",DEGAll_limma,quote=F,sep="\t")
+
+deALL_limma=DEReport(deg = DEGAll_limma, gene.type = 'all', fc = 2, pval = 0.05)
+write.table(file="results/RNAseq_limma_DEG.txt",deALL_limma,quote=F,sep="\t")
+
