@@ -1,0 +1,140 @@
+#3c compare DEG result and WGCNA result
+setwd("D:./")
+setwd("test/03ESCCEAC/")
+eac_meta = read.csv("02result/01DEGAnalysis/EAC_lme.csv",header=T,row.names=1)
+escc_meta = read.csv("02result/01DEGAnalysis/ESCC_lme.csv",header=T,row.names=1)
+be_meta = read.csv("02result/01DEGAnalysis/BEs_lme.csv",header=T,row.names=1)
+genes = intersect(rownames(escc_meta),rownames(eac_meta))
+test1 = eac_meta[genes,] 
+test2 = escc_meta[genes,]
+test3 = be_meta[genes,]
+test1 = test1[which(test1$fdr < 0.05),]
+test2 = test2[which(test2$fdr < 0.05),]
+test3 = test3[which(test2$fdr < 0.05),]
+deg_eac = test1[which(test1$fdr < 0.05 & abs(test1$beta) > 1.5),]
+deg_escc = test2[which(test2$fdr < 0.05 & abs(test2$beta) > 0.7),]
+deg_be = test3[which(test3$fdr < 0.05 & abs(test3$beta) > 1.1),]
+
+net_escc = read.csv("02result/02NetworkAnalysis/TableS1 - ESCC_kME table.csv",header=T,row.names=1)
+escc_table<-data.frame()
+for (i in c("blue","brown","green","grey","red","turquoise","yellow")) {
+    cluster.gene = rownames(net_escc[which(net_escc$Module.Color == i),])
+    genelist = rownames(deg_escc)
+    n=12022
+    x<-genelist
+    y<-cluster.gene
+    a1<-length(intersect(x,y))
+    b1<-length(x)-a1
+    c1<-length(y)-a1
+    d1<-n-a1-b1-c1
+    escc_table[i,1]<-a1
+    escc_table[i,2]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$estimate
+    escc_table[i,3]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$p.value
+}
+colnames(escc_table) = c("overlap","estimate","p_value")
+write.csv(file="02result/02NetworkAnalysis/ESCC.csv",escc_table)
+
+net_eac = read.csv("02result/02NetworkAnalysis/TableS1 - EAC_kME table.csv",header=T,row.names=1)
+eac_table<-data.frame()
+for (i in c("blue","brown","black","grey","red","turquoise","yellow","pink")) {
+    cluster.gene = rownames(net_eac[which(net_eac$Module.Color == i),])
+    genelist = rownames(deg_eac)
+    n=12022
+    x<-genelist
+    y<-cluster.gene
+    a1<-length(intersect(x,y))
+    b1<-length(x)-a1
+    c1<-length(y)-a1
+    d1<-n-a1-b1-c1
+    eac_table[i,1]<-a1
+    eac_table[i,2]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$estimate
+    eac_table[i,3]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$p.value
+}
+colnames(eac_table) = c("overlap","estimate","p_value")
+
+net_eac = read.csv("02result/02NetworkAnalysis/TableS4-DegModuleOverlap/TableS1 - EAC_kME table.csv",header=T,row.names=1)
+be_table<-data.frame()
+for (i in c("blue","brown","black","grey","red","turquoise","yellow","pink")) {
+    cluster.gene = rownames(net_eac[which(net_eac$Module.Color == i),])
+    genelist = rownames(deg_be)
+    n=12022
+    x<-genelist
+    y<-cluster.gene
+    a1<-length(intersect(x,y))
+    b1<-length(x)-a1
+    c1<-length(y)-a1
+    d1<-n-a1-b1-c1
+    be_table[i,1]<-a1
+    be_table[i,2]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$estimate
+    be_table[i,3]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$p.value
+}
+colnames(be_table) = c("overlap","estimate","p_value")
+write.csv(file="02result/02NetworkAnalysis/TableS4-DegModuleOverlap/EAC.csv",eac_table)
+write.csv(file="02result/02NetworkAnalysis/TableS4-DegModuleOverlap/BE.csv",be_table)
+
+
+#cell type enrichment
+marker.list<-read.table("01data/PanglaoDB_markers_27_Mar_2020.tsv",header=T,sep="\t")
+marker.list$cell.type = as.factor(marker.list$cell.type)
+marker.level<-levels(marker.list$cell.type)
+net_escc = read.csv("02result/02NetworkAnalysis/TableS1 - ESCC_kME table.csv",header=T,row.names=1)
+net_eac = read.csv("02result/02NetworkAnalysis/TableS1 - EAC_kME table.csv",header=T,row.names=1)
+
+#ESCC
+ptable<-data.frame()#pvalue of fisher test
+otable<-data.frame()#odds ratio
+ctable<-data.frame()#number of overlap genes
+#calculate fisher.test
+for (i in c("blue","brown","green","grey","red","turquoise","yellow")) {
+    for (j in 1:length(marker.level)) {
+        genelist<-marker.list[marker.list$cell.type==marker.level[j],]
+        genelist<-genelist$official.gene.symbol
+        cluster.gene<-rownames(net_escc[which(net_escc$Module.Color == i),])
+        n=12022   #length of total gene
+        x<-genelist
+        y<-cluster.gene
+        a1<-length(intersect(x,y))
+        b1<-length(x)-a1
+        c1<-length(y)-a1
+        d1<-n-a1-b1-c1
+        ptable[i,j]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$p.value
+        ctable[i,j]<-a1
+        otable[i,j]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$estimate
+}}
+colnames(otable)<-colnames(ptable)<-colnames(ctable)<-marker.level
+table = cbind(t(ctable),t(otable))
+table = cbind(table,t(ptable))
+colnames(table)[1:7] = paste0("overlap.",c("blue","brown","green","grey","red","turquoise","yellow"))
+colnames(table)[8:14] = paste0("estimate.",c("blue","brown","green","grey","red","turquoise","yellow"))
+colnames(table)[15:21] = paste0("pvalue.",c("blue","brown","green","grey","red","turquoise","yellow"))
+write.csv(file="02result/02NetworkAnalysis/TableS5-CellAnnotationESCC.csv",table)
+
+#EAC
+ptable<-data.frame()#pvalue of fisher test
+otable<-data.frame()#odds ratio
+ctable<-data.frame()#number of overlap genes
+#calculate fisher.test
+for (i in c("blue","brown","black","grey","red","turquoise","yellow","pink")) {
+    for (j in 1:length(marker.level)) {
+        genelist<-marker.list[marker.list$cell.type==marker.level[j],]
+        genelist<-genelist$official.gene.symbol
+        cluster.gene<-rownames(net_eac[which(net_eac$Module.Color == i),])
+        n=12022   #length of total gene
+        x<-genelist
+        y<-cluster.gene
+        a1<-length(intersect(x,y))
+        b1<-length(x)-a1
+        c1<-length(y)-a1
+        d1<-n-a1-b1-c1
+        ptable[i,j]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$p.value
+        ctable[i,j]<-a1
+        otable[i,j]<-fisher.test(rbind(c(a1,b1),c(c1,d1)))$estimate
+}}
+colnames(otable)<-colnames(ptable)<-colnames(ctable)<-marker.level
+table = cbind(t(ctable),t(otable))
+table = cbind(table,t(ptable))
+colnames(table)[1:8] = paste0("overlap.",c("blue","brown","black","grey","red","turquoise","yellow","pink"))
+colnames(table)[9:16] = paste0("estimate.",c("blue","brown","black","grey","red","turquoise","yellow","pink"))
+colnames(table)[17:24] = paste0("pvalue.",c("blue","brown","black","grey","red","turquoise","yellow","pink"))
+write.csv(file="02result/02NetworkAnalysis/TableS5-CellAnnotationEAC.csv",table)
+
