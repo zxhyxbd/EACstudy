@@ -1,0 +1,104 @@
+library(edgeR)
+library(org.Hs.eg.db)
+
+
+RNAcounts=read.table(file="results/combined_RNAseq_counts.txt",header=T,sep="\t",row.names=1,check.names = F)
+RNAcounts=RNAcounts[,-c(1,2)]
+#对RNAcount进行归一化，得到表达矩阵
+RNAexpr = DGEList(counts = RNAcounts)
+keep <- rowSums(cpm(RNAexpr) > 1) >= 0.5*ncol(RNAexpr)
+RNAexpr <- RNAexpr[keep,,keep.lib.sizes = TRUE]
+
+RNAexpr = calcNormFactors(RNAexpr)
+RNAexpr <- voom(RNAexpr, design=NULL, plot = FALSE)$E
+
+
+#定义去除重复样本的函数FilterDuplicate
+FilterDuplicate <- function(metadata) {
+  filter <- which(duplicated(metadata[,'sample']))
+  if (length(filter) != 0) {
+    metadata <- metadata[-filter,]
+  }
+  message (paste('Removed', length(filter), 'samples', sep=' '))
+  return (metadata)
+}
+
+#定义过滤样本类型的函数FilterSampleType，只保留PrimaryTumor和SolidTissueNormal这两种样本类型
+FilterSampleType <- function(metadata) {
+  filter <- which(! metadata$sample_type %in% 
+                    c('PrimaryTumor', 'SolidTissueNormal'))
+  if (length(filter) != 0) {
+    metadata <- metadata[-filter,]
+  }
+  message (paste('Removed', length(filter), 'samples', sep=' '))
+  return (metadata)
+}
+
+#读入mRNA seq的sample sheet文件
+metaMatrix.RNA=read.table("gdc_sample_sheet.2022-09-19.tsv",sep="\t",header=T)
+#替换.为下划线，转换成小写，sample_id替换成sample
+names(metaMatrix.RNA)=gsub("sample_id","sample",gsub("\\.","_",tolower(names(metaMatrix.RNA))))
+#删掉最后一列sample_type中的空格
+metaMatrix.RNA$sample_type=gsub(" ","",metaMatrix.RNA$sample_type)
+
+#删掉重复的样本
+metaMatrix.RNA <- FilterDuplicate(metaMatrix.RNA)
+#删掉非PrimaryTumor和SolidTissueNormal的样本
+#会删掉像Recurrent Tumor这样的样本
+metaMatrix.RNA <- FilterSampleType(metaMatrix.RNA)
+
+#读取临床数据
+clinical=read.table("clinical.tsv",sep="\t",header=T,quote="")
+
+#定义函数，用来生成包含生存时间和生存状态的表达矩阵
+make_survival_data=function(genes,clinical, rna.expr, metaMatrix){
+  #提取肿瘤样本
+  metaMatrix <- metaMatrix[metaMatrix$sample_type=='PrimaryTumor',]
+  #删除临床数据中重复的行
+  index=!duplicated(clinical$case_submitter_id)
+  clinical=clinical[index,]
+  rownames(clinical)=clinical$case_submitter_id
+  #提取days_to_death和days_to_last_follow_up
+  day=clinical[as.character(metaMatrix$case_id),c("days_to_death","days_to_last_follow_up")]
+  metaMatrix=cbind(metaMatrix,day)
+  #将days_to_death和days_to_last_follow_up中的'--替换成NA
+  metaMatrix$days_to_death=gsub("\\'--",NA,metaMatrix$days_to_death)
+  metaMatrix$days_to_death=as.numeric(metaMatrix$days_to_death)
+  metaMatrix$days_to_last_follow_up=gsub("\\'--",NA,metaMatrix$days_to_last_follow_up)
+  metaMatrix$days_to_last_follow_up=as.numeric(metaMatrix$days_to_last_follow_up)
+  
+  #提取同时包含表达数据和临床数据的样本
+  samples = intersect(colnames(rna.expr), metaMatrix$sample)
+  #提取相应样本和相应基因的表达值
+  exprDa=rna.expr[genes,samples]
+  
+  #将ensembl基因ID转成基因名字
+  suppressMessages(gene_symbol <- mapIds(org.Hs.eg.db, keys = genes, keytype = "ENSEMBL", column="SYMBOL"))
+  #删除转换失败和重复的基因名字
+  index1=!(is.na(gene_symbol) | duplicated(gene_symbol))
+  exprDa=exprDa[index1,]
+  row.names(exprDa)=gene_symbol[index1]
+  
+  #将days_to_death和days_to_last_follow_up添加到表达矩阵中
+  clinicalDa=metaMatrix[match(samples,metaMatrix$sample),]
+  
+  daysToDeath <- as.numeric(clinicalDa$days_to_death)
+  nonComplt <- is.na(daysToDeath)
+  
+  #获取生存状态
+  vitalStatus <- as.numeric(ifelse(nonComplt, 0, 1))
+  daysToDeath[nonComplt] <- 
+    as.numeric(clinicalDa$days_to_last_follow_up[nonComplt])
+  #得到最终包含生存状态和生存时间的表达矩阵
+  #时间以年为单位
+  surv_data=data.frame(futime=round(daysToDeath/365,2),fustat=vitalStatus,t(exprDa))
+  
+}
+
+#TCG表达谱合并生存时间和状态
+DEG=read.table("results/RNAseq_limma.txt",header=T,sep="\t",row.names=1)
+surv_dat=make_survival_data(gene=rownames(DEG),
+                            clinical=clinical,
+                            rna.expr=RNAexpr,
+                            metaMatrix=metaMatrix.RNA)
+write.csv(file="results/survival_dat.csv",surv_dat)
