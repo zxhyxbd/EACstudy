@@ -1,0 +1,63 @@
+
+library(WGCNA)
+library(affy)
+library(limma)
+library(biomaRt)
+library(sva)
+
+rm(list=ls())
+setwd("01data/01EAC")
+#load phenotypic data
+datMeta = read.csv("metadata_GSE37203.csv")
+rownames(datMeta) = datMeta$Accession
+datMeta$Group = as.factor(datMeta$Group)
+datMeta$Type = as.numeric(datMeta$Type)
+datMeta$Study = "GSE37203"
+
+#read in raw data
+getwd()
+dir.path = "D:/test/03ESCCEAC/01data/01EAC/GSE37203_RAW"
+data.affy = ReadAffy(celfile.path=dir.path)
+idx = match(substr(colnames(exprs(data.affy)),1,9), rownames(datMeta))
+datMeta = datMeta[idx,]
+
+#RMA normalize
+datExpr = rma(data.affy, background=T, normalize=T, verbose=T)
+datExpr = exprs(datExpr)
+colnames(datExpr) = substr(colnames(datExpr),1,9)
+idx = match(colnames(datExpr), rownames(datMeta))
+datMeta = datMeta[idx,]
+ensembl = useMart("ENSEMBL_MART_ENSEMBL",dataset="hsapiens_gene_ensembl", host="feb2014.archive.ensembl.org")
+identifier <- "affy_hg_u133a"
+getinfo <- c("affy_hg_u133a", "ensembl_gene_id", "entrezgene","external_gene_id","chromosome_name","start_position", "end_position")
+geneDat <- getBM(attributes=getinfo,filters=identifier,values=rownames(datExpr),mart=ensembl)
+idx = match(rownames(datExpr), geneDat$affy_hg_u133a)
+datProbes = cbind(rownames(datExpr), geneDat[idx,])
+
+#combind 
+realGenes = !is.na(datProbes$external_gene_id)
+table(realGenes)
+datExpr = datExpr[realGenes,]
+datProbes = datProbes[realGenes,]
+CR = collapseRows(datExpr, rowGroup = datProbes$external_gene_id, rowID =datProbes$affy_hg_u133a)
+datExpr = CR$datETcollapsed
+idx = match(CR$group2row[,"selectedRowID"], datProbes$affy_hg_u133a)
+datProbes = datProbes[idx,]
+rownames(datProbes) = datProbes$external_gene_id
+dim(datExpr)
+
+#unknown covariate correction
+mod = model.matrix(~as.factor(Group), data=datMeta)
+mod0 = model.matrix(~1, data=datMeta)
+n.sv = num.sv(datExpr, mod, method="be")
+svobj = sva(datExpr, mod, mod0, n.sv=n.sv)
+
+cor = cor(datMeta$Type, svobj$sv, method="spearman")
+p = corPvalueFisher(cor, nSamples=46)
+X = svobj$sv[,c(2,3,4,5,6,7,8,9,10,11,12)]
+Y = datExpr
+beta = (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+to_regress = (as.matrix(X) %*% (as.matrix(beta)))
+datExpr = datExpr - t(to_regress)
+save(file="../03clean_data/GSE37203_cleaned.RData", datExpr, datMeta, datProbes)
+
