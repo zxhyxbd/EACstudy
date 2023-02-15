@@ -1,0 +1,107 @@
+library(survival) 
+library(dplyr)
+
+esca_surv=read.csv("results/survival_dat.csv",header=T,row.names=1) 
+select_genes=read.csv('select.csv',header=T)
+a=intersect(colnames(esca_surv),select_genes$Selectgenes)#查看selectgenes是否都在esca_surv的列中
+length(a)
+dim(select_genes)
+select = esca_surv[,a]#提取列
+status = esca_surv[,1:2]#提取生存时间和状态
+esca_surv = cbind(status,select)
+colnames(esca_surv)
+
+pFilter=0.05 #设一个p值标准，后面用
+outResult=data.frame() #建一个空白数据框，后面for循环输出用
+sigGenes=c("fustat","futime") #建一个向量，后面for循环输出用，因为后面还要用到fustat及futime，所以先放在向量里
+for(i in colnames(esca_surv[,3:ncol(esca_surv)])){ #从第3列开始循环，因为1列2列不是gene，是fustat和futime
+  tdcox <- coxph(Surv(futime, fustat) ~ esca_surv[,i], data = esca_surv)#开始逐一循环cox分析
+  tdcoxSummary = summary(tdcox) #summary命令对tdcox总结，方面后面提取数据
+  pvalue=tdcoxSummary$coefficients[,"Pr(>|z|)"] #提取p值，这个主要是后面提取有意义的gene用
+  if(pvalue<pFilter){ # 这里我们不需要提取所有基因的数据，只需要有意义的gene的结果，所以设置如果pvalue<0.05才提取数据
+    sigGenes=c(sigGenes,i)
+    outResult=rbind(outResult,#合并行，实际上是对循环结果的合并，前面设置的空白数据框outResult这里用，循环必须有个开始
+                    cbind(id=i,#合并列，是每个基因的统计数据
+                          HR=tdcoxSummary$conf.int[,"exp(coef)"],#提取单个基因的HR
+                          L95CI=tdcoxSummary$conf.int[,"lower .95"],#提取单个基因的HR的95%CI低值
+                          H95CI=tdcoxSummary$conf.int[,"upper .95"],#提取单个基因的HR的95%CI高值
+                          pvalue=tdcoxSummary$coefficients[,"Pr(>|z|)"])#提取单个基因的p值
+    )
+  }
+}
+
+write.table(outResult,file="results/UniCoxSurvival.txt",sep="\t",row.names=F,quote=F)
+
+
+#森林图绘制
+tducs <- read.table("results/UniCoxSurvival.txt",header=T,sep="\t",row.names=1,check.names=F)
+gene <- rownames(tducs)
+hr <- sprintf("%.3f",tducs$"HR")
+hrLow  <- sprintf("%.3f",tducs$"L95CI")
+hrHigh <- sprintf("%.3f",tducs$"H95CI")
+Hazard.ratio <- paste0(hr,"(",hrLow,"-",hrHigh,")")
+pValue <- ifelse(tducs$pvalue<0.001, "<0.001", sprintf("%.3f", tducs$pvalue))
+
+pdf(file="results/UniCoxSurForestPlot.pdf",width = 6,height = 4)
+n <- nrow(tducs)
+nRow <- n+1
+ylim <- c(1,nRow)
+layout(matrix(c(1,2),nc=2),width=c(2.5,2))
+
+xlim = c(0,2.5)
+par(mar=c(4,2.5,2,1))
+plot(0,xlim=xlim,ylim=ylim,type="n",axes=F,xlab="",ylab="")
+text.cex=0.8
+text(0,n:1,gene,adj=0,cex=text.cex)
+text(1.2-0.5*0.2,n:1,pValue,adj=1,cex=text.cex);text(1.2-0.5*0.2,n+1,'pvalue',cex=text.cex,font=2,adj=1)
+text(2.5,n:1,Hazard.ratio,adj=1,cex=text.cex);text(2.5,n+1,'Hazard ratio',cex=text.cex,font=2,adj=1,)
+
+par(mar=c(4,1,2,1),mgp=c(2,0.5,0))
+xlim = c(0,max(as.numeric(hrLow),as.numeric(hrHigh)))
+plot(0,xlim=xlim,ylim=ylim,type="n",axes=F,ylab="",xaxs="i",xlab="Hazard ratio")
+arrows(as.numeric(hrLow),n:1,as.numeric(hrHigh),n:1,angle=90,code=3,length=0.05,col="darkblue",lwd=2.5)
+abline(v=1,col="black",lty=2,lwd=2)
+boxcolor = ifelse(as.numeric(hr) > 1, 'red', 'green')
+points(as.numeric(hr), n:1, pch = 1, col = boxcolor, cex=1.3)
+axis(1)
+
+dev.off()
+
+
+##Kaplan-Meier curve
+library(survminer)
+
+td=esca_surv
+
+setwd('/Users/emma/Desktop/BEEAC/results/Kaplan-Meier')
+getwd()
+#对有统计学意义的gene绘图
+pFilter=0.05  #设置p值界值
+outResult=data.frame()#新建一个空白数据框，后面循环输出结果用
+
+for(gene in colnames(td[,4:ncol(td)])){
+  cutoff=td[,gene]<=median(td[,gene])
+  fit <- survfit(Surv(futime, fustat) ~cutoff, data = td)
+  pValue = surv_pvalue(fit)$pval #计算log-rank p值，主要是输出结果用
+  outResult=rbind(outResult,cbind(gene=gene,pvalue=pValue))#输出log-rank p值的表格
+  if(pValue<pFilter){
+    pdf(file=paste(gene,"_survival.pdf",sep=""),width=6,height=4)
+    p <- ggsurvplot(fit,
+                    pval = T, pval.method = F, pval.coord= c(0.05, 0.05), pval.size = 5,
+                    conf.int = TRUE, #置信区间
+                    risk.table = F, # 添加风险表
+                    legend = c(0.8, 0.9), # legend位置坐标
+                    legend.title = gene,legend.labs = c("High", "Low"),font.legend = 14,
+                    font.main = c(16, "bold", "darkblue"),font.tickslab = 12,
+                    ylab= "Overall Survival",xlab = "Time (years)",font.x = 16, font.y =16, 
+                    ggtheme = theme_survminer(), # 更改ggplot2的主题
+                    palette = c("red", "cyan3") #定义颜色
+    )
+    print(p,newpage = F)
+    print(gene)
+    dev.off()
+  } # if的大括号
+} # for的大括号
+
+write.table(outResult,file="survival.xls",sep="\t",row.names=F,quote=F)
+
