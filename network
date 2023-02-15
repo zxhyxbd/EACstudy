@@ -1,0 +1,126 @@
+library(WGCNA)
+load("01data/03clean_data/EAC_combinedata.RData")
+genes = intersect(rownames(ESCC_datExpr),rownames(EAC_datExpr))
+ESCC_datExpr = ESCC_datExpr[genes,]
+EAC_datExpr = EAC_datExpr[genes,]
+
+##EAC dataset
+enableWGCNAThreads()
+allowWGCNAThreads()
+powers = c(seq(1,9,by=1),seq(10,30,by=2))
+sft = pickSoftThreshold(t(EAC_datExpr), powerVector = powers, networkType="signed", verbose = 5)
+#soft threshold of EAC datasets is 12
+
+pdf("02result/02NetworkAnalysis/WGCNA-softthresh-EAC.pdf")
+par(mfrow=c(1,2))
+cex1 = 0.9
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",main = paste("Scale independence"))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,cex=cex1,col="red")
+abline(h=0.90,col="red")
+plot(sft$fitIndices[,1], sft$fitIndices[,5],xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+dev.off()
+
+#choose parameter 
+softPower = 12
+adjacent = adjacency(t(EAC_datExpr),power=softPower)
+TOM = TOMsimilarity(adjacent);
+dissTOM = 1-TOM
+geneTree = hclust(as.dist(dissTOM), method = "average")
+
+
+colors = vector(mode="list")
+labels = vector(mode="list")
+for (pam in c(FALSE,TRUE)) {
+  for (minModSize in c(50,100, 200)) {
+    for (dthresh in c(0.1, 0.2)) {
+      for(ds in c(0:4)) { 
+          print(paste("DS=", ds, ",MMS=", minModSize, ",DCOR=",dthresh,",PAM=",pam,sep=""))
+            
+          tree = cutreeHybrid(dendro=geneTree, minClusterSize=minModSize, pamStage=pam, cutHeight = 0.999, deepSplit=ds, distM=as.matrix(as.dist(dissTOM)))
+          merged = mergeCloseModules(exprData=t(EAC_datExpr), colors=tree$labels, cutHeight=dthresh)
+          colors = cbind(colors, labels2colors(merged$colors))
+            
+          labels = c(labels, paste("DS=", ds, ",MMS=", minModSize, ",DCOR=",dthresh,",PAM=",pam,sep=""))
+      }
+    }
+  }
+}
+
+plotDendroAndColors(geneTree, colors, groupLabels=labels, addGuide= TRUE, dendroLabels=FALSE, main="Dendrogram", cex.colorLabels=0.5)
+save(file="01data/04network/WGCNA_diffParams_EAC.rda", geneTree, colors, labels)
+  
+plotDendroAndColors(geneTree,colors,addGuide=T,dendroLabels=F)
+colors = cbind(colors[,15], colors)
+labels = c("Final Modules", labels)
+  
+pdf("02result/02NetworkAnalysis//WGCNA_diffParams_EAC.pdf",width=6,height=8)
+plotDendroAndColors(geneTree,colors,groupLabels = labels,addGuide=T,dendroLabels=F,cex.colorLabels=0.3)
+dev.off()
+
+#for more modules
+#DS=4, MMS=50, DCOR=0.1, PAM=TRUE
+wgcna_parameters = list(powers =  12)
+wgcna_parameters$minModSize = 50
+wgcna_parameters$minHeight = 0.1
+wgcna_parameters$bsize = 20000  ##block size needs to be larger than dim(EAC_datExpr)[1]
+wgcna_parameters$ds = 4  ##deep split parameter contorls number of modules
+wgcna_parameters$networkType = "signed"    ## using signed networks
+wgcna_parameters$corFnc = "bicor"
+wgcna_parameters$pamStage = TRUE
+
+tree = cutreeHybrid(dendro = geneTree, minClusterSize= wgcna_parameters$minModSize, pamStage=wgcna_parameters$pamStage, cutHeight = 0.999, deepSplit=wgcna_parameters$ds, distM=as.matrix(as.dist(dissTOM)))
+merged = mergeCloseModules(exprData= t(EAC_datExpr), colors = tree$labels, cutHeight=wgcna_parameters$minHeight)
+colors = labels2colors(merged$colors)
+table(colors)
+length(table(colors))
+
+pdf("02result/02NetworkAnalysis/WGCNA_netEAC.pdf")
+plotDendroAndColors(geneTree,colors,groupLabels = "mod",cex.colorLabels = 0.5,addGuide=T,dendroLabels=F)
+dev.off()
+
+MEs = moduleEigengenes(expr = t(EAC_datExpr), colors, softPower = wgcna_parameters$powers)
+kMEtable = signedKME(t(EAC_datExpr),MEs$eigengenes)
+table(merged$colors)
+tableS1 = data.frame(kMEtable[,paste0("kME", labels2colors(c(0,1,2,3,4,6,7,8)))])
+colnames(tableS1) = paste0("kME.CD", c(0,1,2,3,4,6,7,8), ".", labels2colors(c(0,1,2,3,4,6,7,8)))
+
+tableS1 = cbind(data.frame(Module.Color=colors, Module.name = paste0("CD",merged$colors)), tableS1)
+
+write.csv(file="02result/02NetworkAnalysis/TableS1 - EAC_kME table.csv", tableS1)
+save(file="01data/04network/finalizedNetwork_EAC.RData", EAC_datExpr, EAC_datMeta, geneTree, colors, wgcna_parameters, MEs, kMEtable)
+
+#module-trait correlation
+rm(list=ls())
+load("01data/04network/finalizedNetwork_EAC.RData")
+
+all_colors = unique(colors)
+all_genes = colors
+names(all_genes) = rownames(EAC_datExpr)
+
+moduleTraitP = matrix(NA,nrow=length(all_colors),ncol=3)
+colnames(moduleTraitP) = c("ANOVA", "EAC", "Barrett_Esophagus")
+rownames(moduleTraitP) = all_colors
+moduleTraitB = moduleTraitSE = moduleTraitP
+
+for (m in all_colors) {
+  me_name = paste("ME", m, sep="")
+  me = MEs$eigengenes[[me_name]]
+  i = which(m == rownames(moduleTraitP))
+  
+  mixedmodel = lme(me ~ Group, data = EAC_datMeta, random = ~1|Accession)
+  moduleTraitP[i,"ANOVA"]=anova(mixedmodel)["Group","p-value"]
+  mixedmodel = summary(mixedmodel)$tTable
+  for(var in c("EAC","Barrett_Esophagus")) {
+    moduleTraitP[i,var] = mixedmodel[grep(var, rownames(mixedmodel)), 5]
+    moduleTraitB[i,var] = mixedmodel[grep(var, rownames(mixedmodel)), 1]
+    moduleTraitSE[i,var] = mixedmodel[grep(var, rownames(mixedmodel)), 2]
+  }
+}
+
+out = cbind(moduleTraitB[,2:3], moduleTraitSE[,2:3], moduleTraitP)
+colnames(out)[1:2] = paste("Beta.", colnames(out)[1:2], sep="")
+colnames(out)[3:4] = paste("SE.", colnames(out)[3:4], sep="")
+colnames(out)[5:7] = paste("P.", colnames(out)[5:7], sep="")
+
+write.csv(file= "02result/02NetworkAnalysis/TableS3-EACModuleTraitCor.csv",out)
