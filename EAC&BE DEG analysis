@@ -1,0 +1,91 @@
+library(nlme)
+library(sva)
+library(reshape2)
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+#EAC data combine
+EAC_multiExpr = vector(mode="list",length=3) 
+load("01data/03clean_data/GSE74553_cleaned.RData") #130
+i=1
+EAC_multiExpr[[i]]$datExpr = datExpr
+EAC_multiExpr[[i]]$datMeta = datMeta 
+EAC_multiExpr[[i]]$datProbes = datProbes
+rm(datExpr,datMeta,datProbes)
+
+load("01data/03clean_data/GSE37203_cleaned.RData") #46
+i=2
+EAC_multiExpr[[i]]$datExpr = datExpr
+EAC_multiExpr[[i]]$datMeta = datMeta 
+EAC_multiExpr[[i]]$datProbes = datProbes
+rm(datExpr,datMeta,datProbes)
+
+load("01data/03clean_data/GSE26886_cleaned.RData") #60
+i=3
+EAC_multiExpr[[i]]$datExpr = datExpr
+EAC_multiExpr[[i]]$datMeta = datMeta 
+EAC_multiExpr[[i]]$datProbes = datProbes
+rm(datExpr,datMeta,datProbes)
+
+genes= intersect(intersect(rownames(EAC_multiExpr[[1]]$datExpr), rownames(EAC_multiExpr[[2]]$datExpr)), rownames(EAC_multiExpr[[3]]$datExpr))
+length(genes) # 12022 genes
+for(i in 1:3) EAC_multiExpr[[i]]$datExpr = EAC_multiExpr[[i]]$datExpr[match(genes,rownames(EAC_multiExpr[[i]]$datExpr)),]
+
+EAC_datExpr = cbind(EAC_multiExpr[[1]]$datExpr,EAC_multiExpr[[2]]$datExpr,EAC_multiExpr[[3]]$datExpr)
+EAC_datMeta = rbind(EAC_multiExpr[[1]]$datMeta[,c("Study", "Accession","Group")],EAC_multiExpr[[2]]$datMeta[,c("Study", "Accession","Group")],EAC_multiExpr[[3]]$datMeta[,c("Study", "Accession","Group")])
+
+#batch correction
+mod = model.matrix(~as.factor(Group), data=EAC_datMeta)
+data_combat = ComBat(dat=EAC_datExpr, batch=EAC_datMeta$Study, mod=mod, par.prior=T)
+EAC_datExpr = data_combat
+save(file="01data/03clean_data/EAC_combinedata.RData",EAC_datExpr,EAC_datMeta)
+
+EAC_meta = matrix(NA, nrow=nrow(EAC_datExpr), ncol=3)
+for(i in 1:nrow(EAC_datExpr)) {
+  if(i%%100==0) print(i)
+  expr = EAC_datExpr[i,]
+  tryCatch({
+    EAC_meta[i,] = summary(lme(expr~ Group,data = EAC_datMeta, random=~1|Accession))$tTable[2,c(1,2,5)]
+  }, error=function(e){})
+}
+EAC_meta = as.data.frame(EAC_meta)
+colnames(EAC_meta) = c("beta", "SE", "p")
+rownames(EAC_meta) = genes
+EAC_meta$fdr = p.adjust(EAC_meta$p, "fdr")
+table(EAC_meta$fdr<0.05 & abs(EAC_meta$beta)>2)
+write.csv(EAC_meta,file="./02result/01DEGAnalysis/EAC_lme.csv")
+
+BE_meta = matrix(NA, nrow=nrow(EAC_datExpr), ncol=3)
+for(i in 1:nrow(EAC_datExpr)) {
+  if(i%%100==0) print(i)
+  expr = EAC_datExpr[i,]
+  tryCatch({
+    BE_meta[i,] = summary(lme(expr~ Group,data = EAC_datMeta, random=~1|Accession))$tTable[3,c(1,2,5)]
+  }, error=function(e){})
+}
+BE_meta = as.data.frame(BE_meta)
+colnames(BE_meta) = c("beta", "SE", "p")
+rownames(BE_meta) = genes
+BE_meta$fdr = p.adjust(BE_meta$p, "fdr")
+table(BE_meta$fdr<0.05 & abs(BE_meta$beta)>2)
+write.csv(BE_meta,file="./02result/01DEGAnalysis/BEs_lme.csv")
+
+###EAC & BE DEG overlap
+eac_meta = read.csv("02result/01DEGAnalysis/EAC_lme.csv",header=T,row.names=1)
+be_meta = read.csv("02result/01DEGAnalysis/BEs_lme.csv",header=T,row.names=1)
+
+test1 = eac_meta[which(eac_meta$fdr < 0.05 & abs(eac_meta$beta) > 1),] #1347
+test2 = be_meta[which(be_meta$fdr < 0.05 & abs(be_meta$beta) > 1),] #1268
+
+a = intersect(rownames(test1),rownames(test2)) # 1007
+b = setdiff(rownames(test1),rownames(test2)) # 340 #EAC specific 
+d = setdiff(rownames(test2),rownames(test1)) # 261 #BE specific
+
+go.a <- enrichGO(a, OrgDb = org.Hs.eg.db, ont='ALL',pAdjustMethod = 'BH',pvalueCutoff = 0.05, qvalueCutoff = 0.2,keyType = 'SYMBOL')
+go.b <- enrichGO(b, OrgDb = org.Hs.eg.db, ont='ALL',pAdjustMethod = 'BH',pvalueCutoff = 0.05, qvalueCutoff = 0.2,keyType = 'SYMBOL')
+go.d <- enrichGO(d, OrgDb = org.Hs.eg.db, ont='ALL',pAdjustMethod = 'BH',pvalueCutoff = 0.05, qvalueCutoff = 0.2,keyType = 'SYMBOL')
+
+write.csv(go.d,"02result/01DEGAnalysis/EAC&BE_DEG/GO_BEspecific.csv")
+pdf("02result/01DEGAnalysis/EAC&BE_DEG/dotplotGO_BEspecific.pdf",h=7,w=8.5)
+dotplot(go.d,showCategory=30,orderBy="Count")
+dev.off()
